@@ -1,7 +1,10 @@
 package com.slinkydeveloper.eventing.hyperfoil.benchmark;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -21,11 +24,7 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
   private final static String CE_RUNID = "ce-runId";
   private final static String CE_METRIC = "ce-metric";
 
-  private String runId;
-  private String phaseId;
-  private String metric;
-  private Statistics stats;
-  private boolean recorded = false;
+  private final List<PhaseStats> phaseStats = new ArrayList<>();
 
   @Override
   public void start(Promise<Void> startPromise) {
@@ -39,10 +38,13 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
     vertx.setPeriodic(60000, id -> {
       // If we do not receive anything for more than 1 minute we'll let statistics be garbage-collected.
       // TODO: compacting stats would be a better approach
-      if (recorded) {
-        recorded = false;
-      } else if (stats != null){
-        stats = null;
+      for (Iterator<PhaseStats> iterator = phaseStats.iterator(); iterator.hasNext(); ) {
+        PhaseStats ps = iterator.next();
+        if (ps.recorded) {
+          ps.recorded = false;
+        } else {
+          iterator.remove();
+        }
       }
     });
   }
@@ -54,38 +56,57 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
     String runId = request.getHeader(CE_RUNID);
     String phaseId = request.getHeader(CE_PHASE);
     String metric = request.getHeader(CE_METRIC);
-    if (stats == null || !Objects.equals(runId, this.runId) || !Objects.equals(phaseId, this.phaseId)|| !Objects.equals(metric, this.metric)) {
-      log.info("Starting data for run {}, phase {}, metric {}, first timestamp is {}", runId, phaseId, metric, new SimpleDateFormat("yyyy-MM-dd hh:mm:ss.S").format(new Date(sendTimestamp)));
-      this.runId = runId;
-      this.phaseId = phaseId;
-      this.metric = metric;
-      stats = new Statistics(now);
-      // Hyperfoil does not publish the last bucket until the stats are marked as complete.
-      // We don't have to care about that since here we're running single-threaded and never know when
-      // we are actually complete.
-      stats.end(now);
+    PhaseStats found = null;
+    for (PhaseStats ps : phaseStats) {
+      if (Objects.equals(runId, ps.runId) && Objects.equals(phaseId, ps.phaseId) && Objects.equals(metric, ps.metric)) {
+        found = ps;
+        break;
+      }
     }
-
-    stats.incrementRequests(sendTimestamp);
-    stats.recordResponse(sendTimestamp,  TimeUnit.MILLISECONDS.toNanos(now - sendTimestamp));
+    if (found == null) {
+      log.info("Starting data for run {}, phase {}, metric {}, first timestamp is {}", runId, phaseId, metric, new SimpleDateFormat("yyyy-MM-dd hh:mm:ss.S").format(new Date(sendTimestamp)));
+      found = new PhaseStats(runId, phaseId, metric, now);
+      phaseStats.add(0, found);
+    }
+    found.recorded = true;
+    found.stats.incrementRequests(sendTimestamp);
+    found.stats.recordResponse(sendTimestamp,  TimeUnit.MILLISECONDS.toNanos(now - sendTimestamp));
     request.response().setStatusCode(202).end();
   }
 
   private void sendStats() {
-    if (stats == null || phaseId == null || runId == null || metric == null) {
-      return;
+    for (PhaseStats ps : phaseStats) {
+      int phaseId = Integer.parseInt(ps.phaseId);
+      ps.stats.visitSnapshots(snapshot -> {
+        if (snapshot.requestCount > 0) {
+          log.info("Sending stats {}/{}/{} #{} ({} requests) to controller", ps.runId, ps.phaseId, ps.metric, snapshot.sequenceId, snapshot.requestCount);
+          vertx.eventBus().send(Feeds.STATS, new RequestStatsMessage(deploymentID(), ps.runId, phaseId, false, 0, ps.metric, snapshot));
+        }
+      });
     }
-    int phaseId = Integer.parseInt(this.phaseId);
-    stats.visitSnapshots(snapshot -> {
-      if (snapshot.requestCount > 0) {
-        log.info("Sending stats #{} ({} requests) to controller", snapshot.sequenceId, snapshot.requestCount);
-        vertx.eventBus().send(Feeds.STATS, new RequestStatsMessage(deploymentID(), runId, phaseId, false, 0, metric, snapshot));
-      }
-    });
   }
 
   public static void main(String[] args) {
     Hyperfoil.clusteredVertx(false)
           .onSuccess(vertx -> vertx.deployVerticle(VertxReceiverVerticle.class, new DeploymentOptions()));
+  }
+
+  public static class PhaseStats {
+    private final String runId;
+    private final String phaseId;
+    private final String metric;
+    private final Statistics stats;
+    private boolean recorded = false;
+
+    public PhaseStats(String runId, String phaseId, String metric, long startTimestamp) {
+      this.runId = runId;
+      this.phaseId = phaseId;
+      this.metric = metric;
+      this.stats = new Statistics(startTimestamp);
+      // Hyperfoil does not publish the last bucket until the stats are marked as complete.
+      // We don't have to care about that since here we're running single-threaded and never know when
+      // we are actually complete.
+      stats.end(startTimestamp);
+    }
   }
 }
