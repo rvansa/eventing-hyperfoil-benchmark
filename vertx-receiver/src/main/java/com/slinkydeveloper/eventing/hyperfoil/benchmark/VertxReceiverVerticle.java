@@ -12,12 +12,15 @@ import io.hyperfoil.Hyperfoil;
 import io.hyperfoil.api.statistics.Statistics;
 import io.hyperfoil.clustering.BaseAuxiliaryVerticle;
 import io.hyperfoil.clustering.Feeds;
+import io.hyperfoil.clustering.messages.DelayStatsCompletionMessage;
 import io.hyperfoil.clustering.messages.RequestStatsMessage;
 import io.vertx.core.DeploymentOptions;
 import io.vertx.core.Promise;
 import io.vertx.core.http.HttpServerRequest;
 
 public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
+  private final static long GARBAGE_COLLECTION_PERIOD = Long.getLong("receiver.gc.period", 60000);
+  private final static long COMPLETION_DELAY_REQUEST_PERIOD = Long.getLong("receiver.gc.period", 5000);
 
   private final static String CE_BENCHMARK_TIMESTAMP_EXTENSION = "ce-benchmarktimestamp";
   private final static String CE_PHASE = "ce-phase";
@@ -35,15 +38,24 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
         .listen(8080)
         .<Void>mapEmpty()
         .onComplete(startPromise);
-    vertx.setPeriodic(60000, id -> {
+    vertx.setPeriodic(GARBAGE_COLLECTION_PERIOD, id -> {
       // If we do not receive anything for more than 1 minute we'll let statistics be garbage-collected.
       // TODO: compacting stats would be a better approach
       for (Iterator<PhaseStats> iterator = phaseStats.iterator(); iterator.hasNext(); ) {
         PhaseStats ps = iterator.next();
-        if (ps.recorded) {
-          ps.recorded = false;
+        if (ps.recordedForGc) {
+          ps.recordedForGc = false;
         } else {
           iterator.remove();
+        }
+      }
+    });
+    vertx.setPeriodic(COMPLETION_DELAY_REQUEST_PERIOD, id -> {
+      for (PhaseStats ps : phaseStats) {
+        if (ps.recordedForDelay) {
+          ps.recordedForDelay = false;
+          int phaseId = Integer.parseInt(ps.phaseId);
+          vertx.eventBus().send(Feeds.STATS, new DelayStatsCompletionMessage(deploymentID(), ps.runId, phaseId, 2 * COMPLETION_DELAY_REQUEST_PERIOD));
         }
       }
     });
@@ -68,7 +80,8 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
       found = new PhaseStats(runId, phaseId, metric, now);
       phaseStats.add(0, found);
     }
-    found.recorded = true;
+    found.recordedForGc = true;
+    found.recordedForDelay = true;
     found.stats.incrementRequests(sendTimestamp);
     found.stats.recordResponse(sendTimestamp,  TimeUnit.MILLISECONDS.toNanos(now - sendTimestamp));
     request.response().setStatusCode(202).end();
@@ -96,7 +109,8 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
     private final String phaseId;
     private final String metric;
     private final Statistics stats;
-    private boolean recorded = false;
+    private boolean recordedForGc = false;
+    private boolean recordedForDelay = false;
 
     public PhaseStats(String runId, String phaseId, String metric, long startTimestamp) {
       this.runId = runId;
