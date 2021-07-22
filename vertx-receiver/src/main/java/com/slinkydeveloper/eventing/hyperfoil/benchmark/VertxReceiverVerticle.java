@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit;
 
 import io.hyperfoil.Hyperfoil;
 import io.hyperfoil.api.statistics.Statistics;
+import io.hyperfoil.api.statistics.StatisticsSnapshot;
 import io.hyperfoil.clustering.BaseAuxiliaryVerticle;
 import io.hyperfoil.clustering.Feeds;
 import io.hyperfoil.clustering.messages.DelayStatsCompletionMessage;
@@ -92,8 +93,12 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
       int phaseId = Integer.parseInt(ps.phaseId);
       ps.stats.visitSnapshots(snapshot -> {
         if (snapshot.requestCount > 0) {
-          log.info("Sending stats {}/{}/{} #{} ({} requests) to controller", ps.runId, ps.phaseId, ps.metric, snapshot.sequenceId, snapshot.requestCount);
-          vertx.eventBus().send(Feeds.STATS, new RequestStatsMessage(deploymentID(), ps.runId, phaseId, false, 0, ps.metric, snapshot));
+          // We need to copy the snapshot because sending on event-bus is asynchronous
+          StatisticsSnapshot clone = snapshot.clone();
+          // Normally end time is capped to Statistics.endTime (which we have set prematurely)
+          clone.histogram.setEndTimeStamp(clone.histogram.getStartTimeStamp() + 1000);
+          log.info("Sending stats {}/{}/{} #{} ({} requests) to controller", ps.runId, ps.phaseId, ps.metric, clone.sequenceId, clone.requestCount);
+          vertx.eventBus().send(Feeds.STATS, new RequestStatsMessage(deploymentID(), ps.runId, phaseId, false, 0, ps.metric, clone));
         }
       });
     }
