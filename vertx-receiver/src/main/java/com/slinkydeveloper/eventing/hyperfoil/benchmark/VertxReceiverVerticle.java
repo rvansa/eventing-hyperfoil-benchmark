@@ -24,6 +24,7 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
   private final static long COMPLETION_DELAY_REQUEST_PERIOD = Long.getLong("receiver.gc.period", 5000);
 
   private final static String CE_BENCHMARK_TIMESTAMP_EXTENSION = "ce-benchmarktimestamp";
+  private final static String CE_PHASE_START_TIMESTAMP = "ce-phasestart";
   private final static String CE_PHASE = "ce-phase";
   private final static String CE_RUNID = "ce-runId";
   private final static String CE_METRIC = "ce-metric";
@@ -77,14 +78,16 @@ public class VertxReceiverVerticle extends BaseAuxiliaryVerticle {
       }
     }
     if (found == null) {
+      String startTimestampStr = request.getHeader(CE_PHASE_START_TIMESTAMP);
+      long startTimestamp = startTimestampStr == null ? sendTimestamp : Long.parseLong(startTimestampStr);
       log.info("Starting data for run {}, phase {}, metric {}, first timestamp is {}", runId, phaseId, metric, new SimpleDateFormat("yyyy-MM-dd hh:mm:ss.S").format(new Date(sendTimestamp)));
-      found = new PhaseStats(runId, phaseId, metric, now);
+      found = new PhaseStats(runId, phaseId, metric, startTimestamp);
       phaseStats.add(0, found);
     }
     found.recordedForGc = true;
     found.recordedForDelay = true;
     found.stats.incrementRequests(sendTimestamp);
-    found.stats.recordResponse(sendTimestamp,  TimeUnit.MILLISECONDS.toNanos(now - sendTimestamp));
+    found.stats.recordResponse(sendTimestamp,  TimeUnit.MILLISECONDS.toNanos(Math.max(0, now - sendTimestamp)));
     request.response().setStatusCode(202).end();
   }
 
